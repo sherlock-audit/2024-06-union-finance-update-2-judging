@@ -1,73 +1,4 @@
-# Issue H-1: `AssetManager::deposit()` not handling the case where `remaining` still true, as a result the deposited token will be lost forever in manager contract 
-
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/9 
-
-## Found by 
-Nyxaris, blutorque
-## Summary
-
-
-## Vulnerability Detail
-
-An user can deposit via `UserManager::stake()` function, the `amount` is transfer from user to the AssetManager contract which supply these funds to corresponding lending markets through adapters. 
-
-If the deposit call below returns `true`, the txn is considered successful, 
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/user/UserManager.sol#L756
-```solidity
-        if (!IAssetManager(assetManager).deposit(stakingToken, amount)) revert AssetManagerDepositFailed();
-
-```
-**Issue**
-
-Aave3Adapter has an edge case, if the `supply()` call to lendingPool fails for any reason, it transferred back the token `amount` to the AssetManager, returning `false`,  
-
-*File: AaveV3Adapter.sol* 
-```solidity
-    function deposit(
-        address tokenAddress
-    ) external override onlyAssetManager checkTokenSupported(tokenAddress) returns (bool) {
-        IERC20Upgradeable token = IERC20Upgradeable(tokenAddress);
-        uint256 amount = token.balanceOf(address(this));
-        try lendingPool.supply(tokenAddress, amount, address(this), 0) {
-            return true;
-        } catch {    // <@ trigger on failure
-            token.safeTransfer(assetManager, amount);
-            return false;
-        }
-    }
-
-```
-
-This edge case is not handled by the AssetManager [`deposit()`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/asset/AssetManager.sol#L274) function, it is expected to return `true` in case the user amount deposited successfully to the lendingPool. However, the issue is it always return `true` even when the deposit was unsuccessful. 
-
-The following check in `UserManager::deposit()` which reverts for unsuccessful deposit get bypass, as a consequences, user deposited funds lost forever in the AssetManager contract. 
-
-```solidity
-        if (!IAssetManager(assetManager).deposit(stakingToken, amount)) revert AssetManagerDepositFailed();
-```
-
-## Impact
-Deposited assets will be lost in the AssetManager 
-
-## Code Snippet
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/asset/AssetManager.sol#L325
-## Tool used
-
-Manual Review
-
-## Recommendation
-The AssetManager deposit function should return `!remaining`, instead of default `true`. 
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/asset/AssetManager.sol#L325
-```diff
--        return true;
-+        return !remaining; 
-    }
-```
-
-If the amount successfully deposited to the lendingPool, the `remaining` will be set false, means assets deposited. 
-And if the amount transferred back to the AssetManager, the `remaining` still true, means assets didn't got deposited, the [check](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/user/UserManager.sol#L756) will revert the txn.    
-
-# Issue H-2: Wrong calculation of Accure Reward in Comptroller.sol 
+# Issue H-1: Wrong calculation of Accure Reward in Comptroller.sol 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/26 
 
@@ -182,12 +113,14 @@ Get 'globalTotalStaked' after calculating all frozen assets in the userManager f
   ++  uint256 globalTotalStaked = userManager.globalTotalStaked();
 ```
 
-# Issue H-3: VouchFaucet can be immediately drained by anyone 
+# Issue H-2: VouchFaucet can be immediately drained by anyone 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/33 
 
+The protocol has acknowledged this issue.
+
 ## Found by 
-0xAadi, Bigsam, Bugvorus, Varun\_05, aua\_oo7, cryptphi, korok
+0xAadi, Bigsam, Bugvorus, Varun\_05, cryptphi, korok, snapishere, trachev
 ## Summary
 
 The `claimTokens` function in the VouchFaucet contract fails to properly enforce the `maxClaimable` limit because it does not update the value in the `claimedTokens` mapping. This allows any address to claim an arbitrary amount of any token, potentially draining the entire token balance of the contract, in a single transaction or through multiple transactions.
@@ -309,193 +242,19 @@ The following additional recommendations should be considered. The suggestions w
 
 3. Consider implementing a time-based cooldown mechanism to limit the frequency of claims per address.
 
-# Issue H-4: Exchange Rate Manipulation via Supply and Redeemable Balance Distortion 
-
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/42 
-
-## Found by 
-Nyxaris, smbv-1923
-## Summary
-An attacker can manipulate the exchange rate in the token system by exploiting the relationship between `_totalRedeemable` and `totalSupply `in the `_exchangeRateStored()` function. This manipulation allows the attacker to artificially inflate the exchange rate, causing new users to receive fewer `uTokens` than expected when minting, and allowing the attacker to profit when redeeming their tokens.
-
-## Vulnerability Detail
-
-The vulnerability lies in the exchange rate calculation:
-```solidity
-function _exchangeRateStored() private view returns (uint256) {
-    uint256 totalSupply_ = totalSupply();
-    return totalSupply_ == 0 ? initialExchangeRateMantissa : (_totalRedeemable * WAD) / totalSupply_;
-}
-```
-An attacker can exploit this by:
-
-Minting a large amount of uTokens
-Borrowing a significant portion of the underlying assets
-Allowing interest to accrue
-Repaying the loan with interest, increasing _totalRedeemable
-Redeeming most of their uTokens, leaving a small totalSupply
-
-This process results in a high _totalRedeemable value and a low totalSupply, artificially inflating the exchange rate.
-
-Initial State:
-
-initialExchangeRateMantissa = 1e18 (1:1 ratio)
-_totalRedeemable = 1,000,000 tokens
-totalSupply = 1,000,000 uTokens
-Exchange Rate = 1e18 (1 token = 1 uToken)
-
-Step 1: Attacker mints 10,000,000 uTokens
-
-_totalRedeemable = 11,000,000 tokens
-totalSupply = 11,000,000 uTokens
-Exchange Rate = 1e18 (unchanged)
-
-Step 2: Attacker borrows 9,900,000 tokens
-
-_totalRedeemable = 11,000,000 tokens (unchanged)
-totalSupply = 11,000,000 uTokens (unchanged)
-Exchange Rate = 1e18 (unchanged)
-
-Step 3: Interest accrues (20% APR over a year)
-
-Accrued interest = 1,980,000 tokens
-
-Step 4: Attacker repays loan with interest
-
-Repayment amount = 11,880,000 tokens
-_totalRedeemable = 22,880,000 tokens
-totalSupply = 11,000,000 uTokens (unchanged)
-New Exchange Rate = (22,880,000 * 1e18) / 11,000,000 ≈ 2.08e18
-
-Step 5: Attacker redeems 10,900,000 uTokens
-
-_totalRedeemable = 22,672,000 tokens
-totalSupply = 100,000 uTokens
-Final Exchange Rate = (22,672,000 * 1e18) / 100,000 ≈ 226.72e18
-
-Impact on New Users
-
-User A tries to mint with 1,000 tokens:
-
-Expected: 1,000 uTokens
-Received: 1,000 * 1e18 / 226.72e18 ≈ 4.41 uTokens
-Loss: 995.59 uTokens worth of value
 
 
-User B tries to mint with 10,000 tokens:
+## Discussion
 
-Expected: 10,000 uTokens
-Received: 10,000 * 1e18 / 226.72e18 ≈ 44.11 uTokens
-Loss: 9,955.89 uTokens worth of value
+**c-plus-plus-equals-c-plus-one**
 
+This highlights the exactly same problem as https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/96 does. So these two issues should probably be merged as one single, duplicates of each other.
 
+**c-plus-plus-equals-c-plus-one**
 
-Attacker's Profit
+@WangSecurity is this one escalated too just like #96 is?
 
-Attacker mints again with 1,000,000 tokens:
-
-Received: 1,000,000 * 1e18 / 226.72e18 ≈ 4,411 uTokens
-
-
-Exchange rate returns to normal (assume 1:1 for simplicity):
-
-Attacker redeems 4,411 uTokens
-Received: 4,411 tokens
-
-
-Profit: 4,411 - 1,000,000 = 3,411 tokens
-
-## Impact
-New users minting uTokens receive fewer tokens than they should, effectively losing value.
-The attacker can later mint uTokens at the inflated rate, gaining more underlying tokens when they redeem.
-
-## Code Snippet
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L810-#L835
-```solidity
-    /**
-     * @dev Mint uTokens by depositing tokens
-     * @param amountIn The amount of the underlying asset to supply
-     */
-    function mint(uint256 amountIn) external override whenNotPaused nonReentrant {
-        if (amountIn < minMintAmount) revert AmountError();
-        if (!accrueInterest()) revert AccrueInterestFailed();
-        uint256 exchangeRate = _exchangeRateStored();
-        IERC20Upgradeable assetToken = IERC20Upgradeable(underlying);
-        uint256 balanceBefore = assetToken.balanceOf(address(this));
-        assetToken.safeTransferFrom(msg.sender, address(this), amountIn);
-        uint256 balanceAfter = assetToken.balanceOf(address(this));
-        uint256 actualObtained = balanceAfter - balanceBefore;
-        uint256 mintTokens = 0;
-        uint256 totalAmount = decimalScaling(actualObtained, underlyingDecimal);
-        uint256 mintFee = decimalScaling((actualObtained * mintFeeRate) / WAD, underlyingDecimal);
-        if (mintFee > 0) {
-            // Minter fee goes to the reserve
-            _totalReserves += mintFee;
-        }
-        // Rest goes to minting UToken
-        uint256 mintAmount = totalAmount - mintFee;
-        _totalRedeemable += mintAmount;
-        mintTokens = (mintAmount * WAD) / exchangeRate;
-        _mint(msg.sender, mintTokens);
-        // send all to asset manager
-        _depositToAssetManager(balanceAfter - balanceBefore);
-
-        emit LogMint(msg.sender, mintAmount, mintTokens);
-    }
-```
-
-## Tool used
-
-Manual Review
-
-## Recommendation
-1.) Implement slippage protection for minting and redemption operations.
-2.) Imlement a maximum exchange 
-```solidity
-
-function _exchangeRateStored() private view returns (uint256) {
-    uint256 totalSupply_ = totalSupply();
-    if (totalSupply_ == 0) return initialExchangeRateMantissa;
-    
-    uint256 calculatedRate = (_totalRedeemable * WAD) / totalSupply_;
-    uint256 maxAllowedRate = initialExchangeRateMantissa * 2;  // Max 100% increase
-    
-    return Math.min(calculatedRate, maxAllowedRate);
-}
-3.)
-Use a time-weighted average price (TWAP) for the exchange rate calculation:
-```solidity
-struct ExchangeRateObservation {
-    uint256 timestamp;
-    uint256 rate;
-}
-
-ExchangeRateObservation[] private rateHistory;
-
-function updateExchangeRate() public {
-    uint256 currentRate = _calculateCurrentRate();
-    rateHistory.push(ExchangeRateObservation(block.timestamp, currentRate));
-    if (rateHistory.length > 10) {
-        // Keep only last 10 observations
-        for (uint i = 0; i < 9; i++) {
-            rateHistory[i] = rateHistory[i+1];
-        }
-        rateHistory.pop();
-    }
-}
-
-function getTWAP() public view returns (uint256) {
-    require(rateHistory.length > 0, "No rate history");
-    uint256 sum = 0;
-    for (uint i = 0; i < rateHistory.length; i++) {
-        sum += rateHistory[i].rate;
-    }
-    return sum / rateHistory.length;
-}
-```
-```
-
-# Issue H-5: Repaying a Loan with Permit in UErc20.sol Wrongly calculates the interest to be paid this Reduce/Increase profits for the protocol as interest calculations are not performed correctly. 
+# Issue H-3: Repaying a Loan with Permit in UErc20.sol Wrongly calculates the interest to be paid this Reduce/Increase profits for the protocol as interest calculations are not performed correctly. 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/43 
 
@@ -603,172 +362,7 @@ function repayBorrowWithPermit(uint256 amount, ...) external {
 }
 ```
 
-# Issue H-6: Malicious user can steal all the funds in the `VouchFaucet` contract 
-
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/96 
-
-## Found by 
-0xAadi, CFSecurity, snapishere, trachev
-### Summary
-
-A malicious user can steal all the tokens from the [`VouchFaucet`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L93), due to a flaw in the [`VouchFaucet::claimTokens()`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L93) function, which is designed to rescue the tokens sent to the contract itself.
-
-### Root Cause
-
-The [`VouchFaucet::claimTokens()`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L93) function contains a security flaw due to insufficient access control and lack of proper validation.
-
-Key issues:
-
-1. This function meant to be a used for recovering potentially lost tokens from the contract, lacks from a proper access control like an `onlyOwner` modifier. This omission allows any user to call it, rather than restricting access to the contract owner
-
-2. There is no validation of the `amount` parameter specified by the use, allowing him so withdraw all the tokens in the contract.
-
-3. The function fails to verify if the caller is entitled to the requested amount
-
-This issues allow a malicious user to steal all the funds in the contract.
-
-### Internal pre-conditions
-
-1. Admin needs to set maxClaimable[token] to a number > 0.
-
-### External pre-conditions
-
-None
-
-### Attack Path
-
-1. Alice accidentally sent 10e18 tokens to the contract, likely intending to to something other with them but making a mistake in the transaction.
-
-2. Bob, aware of a protocol flaw and anticipating such a mistake, noticed this transaction.
-
-3. He exploited the vulnerability by calling the [`VouchFaucet::claimTokens()`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L93) with 10e18 tokens.
-
-4. This action drained all the tokens, resulting in a loss for both Alice and the protocol.
-
-Note:
->Check and run the coded PoC to understand better the vulnerability.
-
-### Impact
-
-Due to a flaw in the [`VouchFaucet::claimTokens()`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L93) function, anyone can steal all the tokens deposited in the contract. This vulnerability can be exploited by malicious actors, leading to significant financial losses.
-
-### PoC
-
-1. In order to run the test, go to the [`VouchFaucet.t.sol`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/test/foundry/peripheral/VouchFaucet.t.sol) contract and replace its content with the one below:
-
-```solidity
-pragma solidity ^0.8.0;
-
-import {TestWrapper} from "../TestWrapper.sol";
-import {VouchFaucet} from "union-v2-contracts/peripheral/VouchFaucet.sol";
-
-import "forge-std/console2.sol";
-
-contract TestVouchFaucet is TestWrapper {
-    VouchFaucet public vouchFaucet;
-
-    uint256 public TRUST_AMOUNT = 10 * UNIT;
-    address BOB = address(1);
-    address ALICE = address(2);
-
-    function setUp() public {
-        deployMocks();
-        vouchFaucet = new VouchFaucet(address(userManagerMock), TRUST_AMOUNT);
-
-        erc20Mock.mint(ALICE, 100 ether);
-
-        vm.startPrank(ALICE);
-        erc20Mock.approve(address(vouchFaucet), type(uint256).max);
-        vm.stopPrank();
-    }
-
-    function testConfig() public {
-        assertEq(vouchFaucet.USER_MANAGER(), address(userManagerMock));
-        assertEq(vouchFaucet.TRUST_AMOUNT(), TRUST_AMOUNT);
-        assertEq(vouchFaucet.STAKING_TOKEN(), userManagerMock.stakingToken());
-    }
-
-    function testSetMaxClaimable(address token, uint256 amount) public {
-        vouchFaucet.setMaxClaimable(token, amount);
-        assertEq(vouchFaucet.maxClaimable(token), amount);
-    }
-
-    function testMaliciousUserCanClaimAllTheTokensInTheContract() public {
-        setUp();
-
-        //ALICE transfers tokens to the contract
-        vm.startPrank(ALICE);
-        erc20Mock.transfer(address(vouchFaucet), 10 ether);
-
-        uint256 contractBalance = erc20Mock.balanceOf(address(vouchFaucet));
-        assertEq(contractBalance, 10 ether);
-
-        vm.stopPrank();
-
-        vm.startPrank(BOB);
-
-        uint256 bobBalanceBefore = erc20Mock.balanceOf(BOB);
-        assertEq(bobBalanceBefore, 0);
-
-        //BOB calls claimTokens() and gets all the tokens in the contract
-        vouchFaucet.claimTokens(address(erc20Mock), 10 ether);
-
-        uint256 bobBalanceAfter = erc20Mock.balanceOf(BOB);
-        assertEq(bobBalanceAfter, 10 ether);
-    }
-
-    function testCannotSetMaxClaimableNonAdmin(address token, uint256 amount) public {
-        vm.prank(address(1234));
-        vm.expectRevert("Ownable: caller is not the owner");
-        vouchFaucet.setMaxClaimable(token, amount);
-    }
-
-    function testClaimVouch() public {
-        vouchFaucet.claimVouch();
-        uint256 trust = userManagerMock.trust(address(vouchFaucet), address(this));
-        assertEq(trust, vouchFaucet.TRUST_AMOUNT());
-    }
-
-    function testStake() public {
-        erc20Mock.mint(address(vouchFaucet), 1 * UNIT);
-        assertEq(userManagerMock.balances(address(vouchFaucet)), 0);
-        vouchFaucet.stake();
-        assertEq(userManagerMock.balances(address(vouchFaucet)), 1 * UNIT);
-    }
-
-    function testExit() public {
-        erc20Mock.mint(address(vouchFaucet), 1 * UNIT);
-        assertEq(userManagerMock.balances(address(vouchFaucet)), 0);
-        vouchFaucet.stake();
-        assertEq(userManagerMock.balances(address(vouchFaucet)), 1 * UNIT);
-        vouchFaucet.exit();
-        assertEq(userManagerMock.balances(address(vouchFaucet)), 0);
-    }
-
-    function testTransferERC20(address to, uint256 amount) public {
-        vm.assume(
-            to != address(0) && to != address(this) && to != address(vouchFaucet) && address(vouchFaucet) != address(0)
-        );
-
-        erc20Mock.mint(address(vouchFaucet), amount);
-        uint256 balBefore = erc20Mock.balanceOf(address(vouchFaucet));
-        vouchFaucet.transferERC20(address(erc20Mock), to, amount);
-        uint256 balAfter = erc20Mock.balanceOf(address(vouchFaucet));
-        assertEq(balBefore - balAfter, amount);
-        assertEq(erc20Mock.balanceOf(to), amount);
-    }
-}
-
-```
-
-2. Run the coded PoC with the following command:
-`forge test --match-test testMaliciousUserCanClaimAllTheTokensInTheContract -vvvv`
-
-### Mitigation
-
-Add a proper access control to the function like an `onlyOwner` modifier
-
-# Issue H-7: The _totalStaked tracker calculation is incorrect and will be inflated due to the improper logic in the writeOffDebt function of the UserManager contract, leading to wrong Comptroller gInflationIndex being calculated and wrong user rewards being issued 
+# Issue H-4: The _totalStaked tracker calculation is incorrect and will be inflated due to the improper logic in the writeOffDebt function of the UserManager contract, leading to wrong Comptroller gInflationIndex being calculated and wrong user rewards being issued 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/105 
 
@@ -996,102 +590,195 @@ Instead of subtracting `amount`, you should subtract the `actualAmount` from the
         vouch.lastUpdated = currTime.toUint64();
 ```
 
-# Issue H-8: Incorrect value `BORROW_RATE_MAX_MANTISSA` used in contracts 
+# Issue M-1: Possible loss of funds, transfer functions can silently fail 
 
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/128 
+Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/22 
 
 ## Found by 
-MohammedRizwan
+Bauchibred, JuggerNaut63, MohammedRizwan, smbv-1923, tsueti\_
 ## Summary
-Incorrect value `BORROW_RATE_MAX_MANTISSA` used in contracts
+Possible loss of funds, transfer functions can silently fail
 
 ## Vulnerability Detail
+`Union` Protocol's contracts are expected to be used USDT, USDC and DAI. The contracts will be deployed on Any EVM compatible chain which also includes Ethereum mainnet itself. Both of these details are mentioned in contest readme. This issue is specifically for tokens like USDT and similar tokens etc on Ethereum mainnet.
 
-Both `UToken.sol` and `FixedInterestRateModel.sol` has used the value of `BORROW_RATE_MAX_MANTISSA` as below:
+The following functions makes use of ERC20's `transferFrom()` in following contracts:
 
-```solidity
-    /**
-     * @dev Maximum borrow rate that can ever be applied (.005% / 12 second)
-     */
-    uint256 internal constant BORROW_RATE_MAX_MANTISSA = 4_166_666_666_667; // 0.005e16 / 12
-```
-
-The issue is that, this calculated value by `0.005e16 / 12` is not correct. `BORROW_RATE_MAX_MANTISSA ` is actually referenced from Compound's [cToken](https://github.com/compound-finance/compound-protocol/blob/a3214f67b73310d547e00fc578e8355911c9d376/contracts/CTokenInterfaces.sol#L31) which is implemented as below:
+1) In `VouchFaucet.sol`, the `claimTokens()` is called by users to claim the tokens and the token is transferred to user but the transfer return value is not checked and similarly in case of `transferERC20()` function.
 
 ```solidity
-    // Maximum borrow rate that can ever be applied (.0005% / block)
-    uint internal constant borrowRateMaxMantissa = 0.0005e16;
-```
+    function claimTokens(address token, uint256 amount) external {
+        require(claimedTokens[token][msg.sender] <= maxClaimable[token], "amount>max");
+@>        IERC20(token).transfer(msg.sender, amount);     @audit // unchecked transfer return value 
+        emit TokensClaimed(msg.sender, token, amount);
+    }
 
-Note here that. the compound's Natspec for `borrowRateMaxMantissa` is not correct which was confirmed in openzeppelin's audit [here](https://blog.openzeppelin.com/compound-audit). Instead of `0.0005%/ block`, it should be `0.005%`. Now coming back to issue, There is huge difference of values of compound's `borrowRateMaxMantissa` and currently implemented `BORROW_RATE_MAX_MANTISSA ` in `Union` contracts.
 
-After calculating the `BORROW_RATE_MAX_MANTISSA` in seconds:
-
-1) Considering compound's `borrowRateMaxMantissa` = 0.0005e16 / 12 = `4_166_666_666_66` 
-
-2) Considering currently implemented Union's `BORROW_RATE_MAX_MANTISSA ` = 0.005e16 / 12 = `4_166_666_666_666`
-
-The difference is clearly of `3_750_000_000_000`.
-
-This would be an incorrect value of `BORROW_RATE_MAX_MANTISSA` and would allow to set the value of `interestRatePerSecond`.
-
-The following functions are greatly affected by this issue:
-
-```solidity
-    function setInterestRate(uint256 _interestRatePerSecond) external override onlyOwner {
-@>        if (_interestRatePerSecond > BORROW_RATE_MAX_MANTISSA) revert BorrowRateExceeded();
-        interestRatePerSecond = _interestRatePerSecond;
-
-        emit LogNewInterestParams(_interestRatePerSecond);
+    function transferERC20(address token, address to, uint256 amount) external onlyOwner {
+@>        IERC20(token).transfer(to, amount);                @audit // unchecked transfer return value 
     }
 ```
 
-and 
+2) In `ERC1155Voucher.transferERC20()`, tokens are being transferred to recipient address and return value is not checked.
 
 ```solidity
-    function borrowRatePerSecond() public view override returns (uint256) {
-        uint256 borrowRateMantissa = interestRateModel.getBorrowRate();
-@>        if (borrowRateMantissa > BORROW_RATE_MAX_MANTISSA) revert BorrowRateExceedLimit();
-
-        return borrowRateMantissa;
+    function transferERC20(address token, address to, uint256 amount) external onlyOwner {
+@>        IERC20(token).transfer(to, amount);            @audit // unchecked transfer return value 
     }
-```
-`borrowRatePerSecond()` is further used in `_calculatingInterest()` and `accrueInterest()` functions and both of these functions have been extensively used across `union` contracts.
+``` 
+The issue here is with the use of unsafe `transfer()` function. The `ERC20.transfer()` function return a boolean value indicating success. This parameter needs to be checked for success. Some tokens do not revert if the transfer failed but return false instead.
 
-Another point is that, `Hundred finance` which is also deployed on `optimism` mainnet has used `borrowRateMaxMantissa` as below:
+Some tokens like `USDT` don't correctly implement the EIP20 standard and their transfer() function return void instead of a success boolean. Calling these functions with the correct EIP20 function signatures will always revert.
 
-```solidity
-    uint internal constant borrowRateMaxMantissa = 0.00004e16;
-```
-
-Upon, further calculations, its concluded that `0.00004e16 (0.0005e16/12)` is actually derived from `Compound's `borrowRateMaxMantissa` which is `0.0005e16` . Since compound uses `block number` to calculate interest so `borrowRateMaxMantissa` is calculated as `0.0005e16/ block` and Hundred finance has used `block timestamp` to calculate interest so `borrowRateMaxMantissa` is calculated as `0.0005e16/ second` therefore, `union` should also follow same as `Hundred finance` used `borrowRateMaxMantissa` on Optimisim mainnet.
+Tokens that don't actually perform the transfer and return false are still counted as a correct transfer and tokens that don't correctly implement the latest EIP20 spec, like USDT, will be unusable in the protocol as they revert the transaction because of the missing return value. There could be silent failure in transfer which may lead to loss of user funds in `ERC1155Voucher.transferERC20()` and `VouchFaucet.claimTokens()`
 
 ## Impact
-`BORROW_RATE_MAX_MANTISSA` is the maximum borrow rate that can ever be applied in `Union` contracts has been used incorrectly. This would break the `borrowRatePerSecond()` function which is used to calculate the borrow rate and this borrow rate is fetched while calulating interest and acrueing interest. Since, it would result in huge difference as said above so this break a maximum borrow rate mantissa as referred from Compound. 
+Tokens that don't actually perform the transfer and return false are still counted as a correct transfer and tokens that don't correctly implement the latest EIP20 spec will be unusable in the protocol as they revert the transaction because of the missing return value. This will lead to loss of user funds.
 
 ## Code Snippet
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/FixedInterestRateModel.sol#L18
+https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L95
 
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L74
+https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L124
 
 ## Tool used
 Manual Review
 
 ## Recommendation
-Consider calculating the `BORROW_RATE_MAX_MANTISSA` from `0.0005e16` instead of `0.005e16` due to as explained above.
+Use OpenZeppelin's SafeERC20 versions with the `safeTransfer()` function instead of `transfer()`.
 
-Consider below changes in both `UToken.sol` and `FixedInterestRateModel.sol`:
+For example, consider below changes in `VouchFaucet.sol`:
 
 ```diff
-    /**
--     * @dev Maximum borrow rate that can ever be applied (0.005% / 12 second)
-+    * @dev Maximum borrow rate that can ever be applied (0.05% / 12 second)
-     */
--    uint256 public constant BORROW_RATE_MAX_MANTISSA = 4_166_666_666_667; // 0.005e16 / 12
-+    uint256 public constant BORROW_RATE_MAX_MANTISSA = 0.00004e16;                  // 0.0005e16 / 12
++ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+contract VouchFaucet is Ownable {
+
++      using SafeERC20 for IERC20;
+
+    function claimTokens(address token, uint256 amount) external {
+        require(claimedTokens[token][msg.sender] <= maxClaimable[token], "amount>max");
+-        IERC20(token).transfer(msg.sender, amount);     
++       IERC20(token).safeTransfer(msg.sender, amount);    
+        emit TokensClaimed(msg.sender, token, amount);
+    }
+
+
+    function transferERC20(address token, address to, uint256 amount) external onlyOwner {
+-        IERC20(token).transfer(to, amount);              
++        IERC20(token).safeTransfer(to, amount);    
+    }
 ```
 
-# Issue M-1: `ERC1155Voucher.onERC1155BatchReceived()` does not check the caller is the valid token therefore any unregistered token can invoke `onERC1155BatchReceived()` 
+
+
+## Discussion
+
+**sherlock-admin3**
+
+1 comment(s) were left on this issue during the judging contest.
+
+**0xmystery** commented:
+>  Low QA on safeTransfer
+
+
+
+**0xRizwan**
+
+I believe, this issue is incorrectly judged. 
+
+@mystery0x 
+> Low QA on safeTransfer
+
+There is no such rule at sherlock.
+
+Per the contest readme, the protocol is expected to be deployed on any EVM compatible network so this includes `Ethereum` mainnet itself and the above issue regarding safe transfers is relevant for Ethereum mainnet only.
+
+> On what chains are the smart contracts going to be deployed?
+Any EVM compatible network
+
+contest readme further confirms, USDT/USDC would be used in contracts.
+
+> If you are integrating tokens, are you allowing only whitelisted tokens to work with the codebase or any complying with the standard? Are they assumed to have certain properties, e.g. be non-reentrant? Are there any types of [weird tokens](https://github.com/d-xo/weird-erc20) you want to integrate?
+USDC, USDT, DAI
+
+Per sherlock [rules](https://github.com/sherlock-protocol/sherlock-v2-docs/blob/e7dc89270b05f8d2fcee69dc4204c7a2b8fb4cf9/audits/judging/judging/README.md#vii-list-of-issue-categories-that-are-not-considered-valid), 
+
+> 23. Non-Standard tokens: Issues related to tokens with non-standard behaviors, such as [weird-tokens](https://github.com/d-xo/weird-erc20) are not considered valid by default unless these tokens are explicitly mentioned in the README.
+
+Since, USDT is mentioned in readme so the non-standard behabiour pertaining to USDT would be valid issue for this contest.
+
+Affected functions would be `transferERC20()` in `VouchFaucet.sol` and `ERC1155Voucher.sol`.
+
+```
+    function transferERC20(address token, address to, uint256 amount) external onlyOwner {
+        IERC20(token).transfer(to, amount);
+    }
+```
+
+Similar such issue with similar readme questionare had been judged as Medium severity. see- [Notional issue](https://github.com/sherlock-audit/2023-12-notional-update-5-judging/issues/19) and [Teller](https://github.com/sherlock-audit/2024-04-teller-finance-judging/issues/265)
+
+Therefore, based on above arguements this issue should be valid medium severity.
+
+
+**0xMR0**
+
+Escalate 
+
+on behalf of @0xRizwan 
+
+**sherlock-admin3**
+
+> Escalate 
+> 
+> on behalf of @0xRizwan 
+
+You've created a valid escalation!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**mystery0x**
+
+This is a widely known issue typically deemed low/informational. Will let the sponsors and the Sherlock judge decide its medium validity.
+
+**WangSecurity**
+
+Just checking for transfer return value is invalid I agree, but the problem here is that regular `transfer` will try to extract a boolean from the transfer which will revert, so for example, the users won't be able to call [`claimTokens`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L93) in VouchFacet. But, regular `transfer` is used only in VouchFacet and `ERC1155Voucher`, @mystery0x and @0xRizwan could you assist me with how severe these would be the revert in these functions, and what operations would be impossible in case of such reverts?
+
+**Bauchibred**
+
+HI @WangSecurity, to chime in here, wouldn't the fact that these contracts do not work with USDT suffice as medium, since it's been indicated in the readMe that the protocol is to work with USDT, USDC & DAI? If yes, do check #17, I was initially waiting till the resolution of this escalation before hinting it's a duplicate. But I believe both reports are duplicates and #17 does show how `ERC1155Voucher#transferERC20()` & `VouchFaucet#transferERC20()` would never work with USDT.
+
+**WangSecurity**
+
+@Bauchibred fair point, still I wanted to know if maybe there's no impact and these functions wouldn't be used. But further considering this, I agree it's medium severity, since regardless of the goal of these functions, they won't work with USDT. Planning to accept the escalation. The duplicate is #17, @mystery0x @Bauchibred @0xRizwan are there any other duplicates?
+
+**MD-YashShah1923**
+
+@WangSecurity https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/116
+this as well is duplicate of this issue.
+
+**0xRizwan**
+
+@WangSecurity #11 #17 #57 #116 should be duplicates.
+
+**WangSecurity**
+
+Result:
+Medium
+Has duplicates
+
+PS: I see some of the duplicates are insufficient, I'll comment on them directly explaining why.
+
+**sherlock-admin4**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xMR0](https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/22/#issuecomment-2241989138): accepted
+
+# Issue M-2: `ERC1155Voucher.onERC1155BatchReceived()` does not check the caller is the valid token therefore any unregistered token can invoke `onERC1155BatchReceived()` 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/23 
 
@@ -1179,399 +866,192 @@ Consider below changes:
     }
 ```
 
-# Issue M-2: Permit functions in `Union` contracts can be affected by DOS 
+# Issue M-3: Any user can claim an unlimited amount of vouch in `VouchFaucet.sol` 
 
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/65 
-
-## Found by 
-0xlucky, Matin, MohammedRizwan, Shawler, smbv-1923
-## Summary
-Permit functions in `Union` contracts can be affected by DOS
-
-## Vulnerability Detail
-The following inscope `Union` contracts supports ERC20 permit functionality by which users could spend the tokens by signing an approval off-chain.
-
-1) In `UDai.repayBorrowWithPermit()`, , after the permit call is successful there is a call to `_repayBorrowFresh()`
-
-```solidity
-    function repayBorrowWithPermit(
-        address borrower,
-        uint256 amount,
-        uint256 nonce,
-        uint256 expiry,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external whenNotPaused {
-        IDai erc20Token = IDai(underlying);
-@>        erc20Token.permit(msg.sender, address(this), nonce, expiry, true, v, r, s);
-
-        if (!accrueInterest()) revert AccrueInterestFailed();
-        uint256 interest = calculatingInterest(borrower);
-        _repayBorrowFresh(msg.sender, borrower, decimalScaling(amount, underlyingDecimal), interest);
-    }
-
-```
-
-2) In `UErc20.repayBorrowWithERC20Permit()`, , after the permit call is successful there is a call to `_repayBorrowFresh()`
-
-```solidity
-    function repayBorrowWithERC20Permit(
-        address borrower,
-        uint256 amount,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external whenNotPaused {
-        IERC20Permit erc20Token = IERC20Permit(underlying);
-@>        erc20Token.permit(msg.sender, address(this), amount, deadline, v, r, s);
-
-        if (!accrueInterest()) revert AccrueInterestFailed();
-        uint256 interest = calculatingInterest(borrower);
-        _repayBorrowFresh(msg.sender, borrower, decimalScaling(amount, underlyingDecimal), interest);
-    }
-```
-
-3) In `UserManager.registerMemberWithPermit()`, , after the permit call is successful there is a call to `registerMember()`
-
-```solidity
-    function registerMemberWithPermit(
-        address newMember,
-        uint256 value,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external whenNotPaused {
-@>        IUnionToken(unionToken).permit(msg.sender, address(this), value, deadline, v, r, s);
-        registerMember(newMember);
-    }
-
-```
-
-4) `UserManagerDAI.stakeWithPermit()`, , after the permit call is successful there is a call to `stake()`
-
-```solidity
-    function stakeWithPermit(
-        uint256 amount,
-        uint256 nonce,
-        uint256 expiry,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external whenNotPaused {
-        IDai erc20Token = IDai(stakingToken);
-@>        erc20Token.permit(msg.sender, address(this), nonce, expiry, true, v, r, s);
-
-        stake(amount.toUint96());
-    }
-```
-
-5) In `UserManagerERC20.stakeWithERC20Permit()`, , after the permit call is successful there is a call to `stake()`
-
-```solidity
-    function stakeWithERC20Permit(
-        uint256 amount,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external whenNotPaused {
-        IERC20Permit erc20Token = IERC20Permit(stakingToken);
-        erc20Token.permit(msg.sender, address(this), amount, deadline, v, r, s);
-
-        stake(amount.toUint96());
-    }
-```
-
-The issue is that while the transactions for either of above permit functions is in mempool, anyone could extract the signature parameters from the call to front-run the transaction with direct permit call.
-
-This issue is originally submitted by Trust security aka Trust to various on chain protocols and the issue is confirmed by reputed protocols like Open Zeppelin, AAVE, The Graph, Uniswap-V2
-
-To understand the issue in detail, Please refer below link:
-
-link: https://www.trust-security.xyz/post/permission-denied
-
-> An attacker can extract the signature by observing the mempool, front-run the victim with a direct permit, and revert the function call for the user. "In the case that there is no fallback code path the DOS is long-term (there are bypasses through flashbots in some chains, but that's a really bad scenario to resort to)." as stated by Trust Security.
-
-Since, the protocol would  be deployed on any EVM compatible chain so Ethereum mainnet has mempool with others chain too. This issue would indeed increase the approval for the user if the front-run got successful. But as the permit has already been used, the call to either of above permit functions will revert making whole transaction revert. Thus making the victim not able to make successful call to either of above permit functions to carry out borrow repay or stake or member registration.
-
-Consider a normal scenario,
-
-1) Bob wants to repay his loan with permit so he calls `UErc20.repayBorrowWithERC20Permit()` function.
-
-2) Alice observes the transactions in mempool and extract the signature parameters from the call to front-run the transaction with direct permit call. Alice transaction got successful due to high gas fee paid by her to minor by front running the Bob's transaction.
-
-3) This action by Alice would indeed increase the approval for the Bob since the front-run got successful.
-
-4) But as the permit is already been used by Alice so the call to `UErc20.repayBorrowWithERC20Permit()` will revert making whole transaction revert.
-
-5) Now, Bob will not able to make successful call to `UErc20.repayBorrowWithERC20Permit()` function to pay his loan by using ERC20 permit(). This is due to griefing attack by Alice. She keep repeating such attack as the intent is to grief the protocol users.
-
-## Impact
-Users will not be able to use the permit functions for important functions like `UDai.repayBorrowWithPermit()`, `UErc20.repayBorrowWithERC20Permit()`, `UserManager.registerMemberWithPermit()`, `UserManagerDAI.stakeWithPermit()` and `UserManagerERC20.stakeWithERC20Permit()` so these function would be practically unusable and users functionality would be affected due to above described issue
-
-## Code Snippet
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UDai.sol#L19
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UErc20.sol#L17
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/user/UserManager.sol#L711
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/user/UserManagerDAI.sol#L29
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/user/UserManagerERC20.sol#L27
-
-## Tool used
-Manual Review
-
-## Recommendation
-Wrap the `permit` calls in a try catch block in above functions using permit().
-
-# Issue M-3: Current Implementation of deposit in Assetmanager.sol fails to iletarate to fill floor in the moneymarket and instead deposits all into one moneymarket 
-
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/98 
+Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/102 
 
 ## Found by 
-Bigsam
+trachev
 ## Summary
-
-The current implementation of the `deposit` function in `AssetManager.sol` does not properly distribute funds among money markets according to their floors and ceilings. This can result in all funds being deposited into a single money market, potentially bypassing the ceiling limits.
+Currently, there is no validation performed in `VouchFaucet.sol` when `claimVouch` is called. This is highly dangerous as any untrusted user can increase their vouch and perform malicious borrows, stealing from the contract's stake.
 
 ## Vulnerability Detail
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L307
-
-The `deposit` function is intended to first fill the floors of supported money markets before distributing the remaining funds to the ceilings. However, the current implementation does not correctly iterate through the money markets to fill the floors, leading to all funds being deposited into a single money market. This could allow users to bypass the ceiling limits if they deposit a large amount of funds.
-
-Here is the current implementation of the function:
-
+As we can see in the `claimVouch` function there is no validation performed and it can be called by any address:
 ```solidity
-function deposit(
-    address token,
-    uint256 amount
-) external override whenNotPaused onlyAuth(token) nonReentrant returns (bool) {
-    IERC20Upgradeable poolToken = IERC20Upgradeable(token);
-    if (amount == 0) revert AmountZero();
-
-    if (!_isUToken(msg.sender, token)) {
-        balances[msg.sender][token] += amount;
-        totalPrincipal[token] += amount;
-    }
-
-    bool remaining = true;
-    poolToken.safeTransferFrom(msg.sender, address(this), amount);
-    if (isMarketSupported(token)) {
-        uint256 moneyMarketsLength = moneyMarkets.length;
-        for (uint256 i = 0; i < moneyMarketsLength && remaining; i++) {
-            IMoneyMarketAdapter moneyMarket = moneyMarkets[i];
-            if (!moneyMarket.supportsToken(token)) continue;
-        @audit >> checks if floor has been reached >>>    if (moneyMarket.floorMap(token) <= moneyMarket.getSupply(token)) continue;
-        @audit >> deposits all into one money market, risk that can allow for floor + amount>ceiling  >>>    poolToken.safeTransfer(address(moneyMarket), amount);
-            if (moneyMarket.deposit(token)) {
-                remaining = false;
-            }
-       ...................................................................
-  
+function claimVouch() external {
+        IUserManager(USER_MANAGER).updateTrust(msg.sender, uint96(TRUST_AMOUNT));
+        emit VouchClaimed(msg.sender);
 }
 ```
 
+In addition to that, the maximum amount of trust that any user can claim - `TRUST_AMOUNT` can easily be bypassed by calling `claimVouch`, borrowing the entire `TRUST_AMOUNT` and after that calling `claimVouch` again.
+
 ## Impact
-
-
-The incorrect handling of the floors can lead to a single money market receiving more funds than its ceiling limit, resulting in potential overexposure and liquidity issues. This can negatively impact the stability and performance of the protocol. This is not submitted as a high because the admin can rebalance this but it should be implemented appropriately.
+Malicious borrows can be made by untrusted users and the maximum amount that can be vouched for a user can be bypassed, putting the contract's funds at risk of being stolen.
 
 ## Code Snippet
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L291-L292
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L293-L303
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L268-L326
+https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/peripheral/VouchFaucet.sol#L87-L90
 
 ## Tool used
 
 Manual Review
 
 ## Recommendation
+Only users approved by the owner should be able to call `claimVouch` and they should not be able to claim more trust than `TRUST_AMOUNT`.
 
-Update the `deposit` function to correctly iterate through the money markets, ensuring that floors are filled before distributing the remaining funds to the ceilings. The function should check the amount needed to fill each money market to the floor before attempting to fill to the ceiling. Here is the updated code:
 
-```solidity
-function deposit(
-    address token,
-    uint256 amount
-) external override whenNotPaused onlyAuth(token) nonReentrant returns (bool) {
-    IERC20Upgradeable poolToken = IERC20Upgradeable(token);
-    if (amount == 0) revert AmountZero();
 
-    if (!_isUToken(msg.sender, token)) {
-        balances[msg.sender][token] += amount;
-        totalPrincipal[token] += amount;
-    }
+## Discussion
 
-    poolToken.safeTransferFrom(msg.sender, address(this), amount);
+**sherlock-admin4**
 
-    if (isMarketSupported(token)) {
-        uint256 moneyMarketsLength = moneyMarkets.length;
+1 comment(s) were left on this issue during the judging contest.
 
-        // Iterate markets to fill floors
-        for (uint256 i = 0; i < moneyMarketsLength && amount > 0; i++) {
-            IMoneyMarketAdapter moneyMarket = moneyMarkets[i];
+**0xmystery** commented:
+>  Intended design. (borrower == staker) is checked to prevent self vaouching in updateTrust()
 
-            if (!moneyMarket.supportsToken(token)) continue;
 
-            uint256 currentSupply = moneyMarket.getSupply(token);
-            uint256 floor = moneyMarket.floorMap(token);
-            if (currentSupply >= floor) continue;
 
-   ++         uint256 amountToDeposit = floor - currentSupply;
-   ++        if (amountToDeposit > amount) {
-   ++            amountToDeposit = amount;
-            }
+**trachevgeorgi**
 
-   ++        poolToken.safeTransfer(address(moneyMarket), amountToDeposit);
-            if (moneyMarket.deposit(token)) {
-     ++           amount -= amountToDeposit;
-    ++   if (amount==0){
-         remaining = false;
-            }
-        }
+Escalate
+This issue has been incorrectly excluded. The comment from @mystery0x is not connected to the issue as the problem is not related to whether the borrower is the same as the staker. 
+The issue revolves around the fact that any user can claim more trust than the allowed limit (`TRUST_AMOUNT`), thus allowing any user to claim as much trust as they wish from the `VouchFaucet.sol` contract. As a result, a single user can block any other users from successfully calling the `claimVouch` function.
+This is definitely not the intended behaviour of the function as most likely only one user will claim all of the contract's trust.
 
- 
-}
-```
+**sherlock-admin3**
 
-# Issue M-4: Function Rebalance can deposit above Moneymarket ceiling 
+> Escalate
+> This issue has been incorrectly excluded. The comment from @mystery0x is not connected to the issue as the problem is not related to whether the borrower is the same as the staker. 
+> The issue revolves around the fact that any user can claim more trust than the allowed limit (`TRUST_AMOUNT`), thus allowing any user to claim as much trust as they wish from the `VouchFaucet.sol` contract. As a result, a single user can block any other users from successfully calling the `claimVouch` function.
+> This is definitely not the intended behaviour of the function as most likely only one user will claim all of the contract's trust.
 
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/109 
+You've created a valid escalation!
 
-## Found by 
-Bigsam
-## Summary
+To remove the escalation from consideration: Delete your comment.
 
-The current implementation of the `rebalance` function in `AssetManager.sol` redistributes tokens among supported money markets. However, it fails to check if the amount to be deposited exceeds the ceiling of the money market, thereby potentially violating one of the core checks of the protocol.
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
 
-## Vulnerability Detail
-The `rebalance` function is designed to redistribute tokens among supported money markets according to specified percentages. However, it does not check if the amount being deposited exceeds the ceiling of any money market, which can lead to deposits above the ceiling limit. This breaks one of the core checks in the protocol that prevents deposits above a money market ceiling.
+**mystery0x**
 
-Here is the current implementation of the `rebalance` function:
+There is `onlyMember` visibility in `updateTrust()`:
 
-```solidity
-function rebalance(
-    address tokenAddress,
-    uint256[] calldata percentages
-) external override onlyOwner whenNotPaused nonReentrant {
-    IERC20Upgradeable token = IERC20Upgradeable(tokenAddress);
-    uint256 tokenSupply = token.balanceOf(address(this));
-    uint256 percentagesLength = percentages.length;
-    uint256 supportedMoneyMarketsSize = supportedMoneyMarkets.length;
-
-    require(percentagesLength == supportedMoneyMarketsSize, "AssetManager: mismatched input lengths");
-
-    for (uint256 i = 0; i < percentagesLength; i++) {
-        IMoneyMarketAdapter moneyMarket = supportedMoneyMarkets[i];
-        uint256 amountToDeposit = (tokenSupply * percentages[i]) / 10000;
-        if (amountToDeposit == 0) continue;
-
- @audit>>   amountToDeposit can be greater than  ceiling  >>      token.safeTransfer(address(moneyMarket), amountToDeposit);
-        
-moneyMarket.deposit(tokenAddress);
-    }
-
-    uint256 remainingTokens = token.balanceOf(address(this));
-
-    IMoneyMarketAdapter lastMoneyMarket = supportedMoneyMarkets[supportedMoneyMarketsSize - 1];
-    if (remainingTokens > 0) {
-
-       @audit>>   remainingTokens can be greater than ceiling  >>     token.safeTransfer(address(lastMoneyMarket), remainingTokens);
-
-        lastMoneyMarket.deposit(tokenAddress);
-    }
-}
-```
-
-## Impact
-
-Failing to check if the amount to be deposited exceeds the ceiling of the money market can lead to deposits above the ceiling limit. This can result in potential overexposure and liquidity issues in the protocol.
-
-## Code Snippet
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L308
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L561-L563
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L570-L571
-
-https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/asset/AssetManager.sol#L525-L575
-## Tool used
-
-Manual Review
-
-## Recommendation
-
-Add a check to ensure that the amount to be deposited does not exceed the ceiling of the money market. If the amount exceeds the ceiling, the function should revert.
-
-Here is the updated code:
-
-```solidity
-  function rebalance(
-        address tokenAddress,
-        uint256[] calldata percentages
-    ) external override onlyAdmin checkMarketSupported(tokenAddress) {
-        IERC20Upgradeable token = IERC20Upgradeable(tokenAddress);
-        uint256 moneyMarketsLength = moneyMarkets.length;
-        uint256 percentagesLength = percentages.length;
-
-        IMoneyMarketAdapter[] memory supportedMoneyMarkets = new IMoneyMarketAdapter[](moneyMarketsLength);
-        uint256 supportedMoneyMarketsSize;
-
-        // Loop through each money market and withdraw all the tokens
-        for (uint256 i = 0; i < moneyMarketsLength; i++) {
-            IMoneyMarketAdapter moneyMarket = moneyMarkets[i];
-            if (!moneyMarket.supportsToken(tokenAddress)) continue;
-            supportedMoneyMarkets[supportedMoneyMarketsSize] = moneyMarket;
-            supportedMoneyMarketsSize++;
-            moneyMarket.withdrawAll(tokenAddress, address(this));
-        }
-
-        if (percentagesLength + 1 != supportedMoneyMarketsSize) revert NotParity();
-
-        uint256 tokenSupply = token.balanceOf(address(this));
-
-        for (uint256 i = 0; i < percentagesLength; i++) {
-            IMoneyMarketAdapter moneyMarket = supportedMoneyMarkets[i];
-            uint256 amountToDeposit = (tokenSupply * percentages[i]) / 10000;
-            if (amountToDeposit == 0) continue;
-
- ++       uint256 currentSupply = moneyMarket.getSupply(tokenAddress); // which is 0 since we have withdrawn all
- ++     uint256 ceiling = moneyMarket.ceilingMap(tokenAddress);
- ++      if (currentSupply + amountToDeposit > ceiling) {
- ++         revert("AssetManager: deposit amount exceeds ceiling");
-        }
-            token.safeTransfer(address(moneyMarket), amountToDeposit);
-            moneyMarket.deposit(tokenAddress);
-        }
-
-        uint256 remainingTokens = token.balanceOf(address(this));
-
-        IMoneyMarketAdapter lastMoneyMarket = supportedMoneyMarkets[supportedMoneyMarketsSize - 1];
-        if (remainingTokens > 0) {
-     ++       uint256 currentSupply = lastMoneyMarket.getSupply(tokenAddress); // which is 0 since we have withdrawn all
-     ++       uint256 ceiling = lastMoneyMarket.ceilingMap(tokenAddress);
-     ++       if (currentSupply + remainingTokens > ceiling) {
-     ++       revert("AssetManager: deposit amount exceeds ceiling");
-          }
-            token.safeTransfer(address(lastMoneyMarket), remainingTokens);
-            lastMoneyMarket.deposit(tokenAddress);
-        }
-
-        emit LogRebalance(tokenAddress, percentages);
-    }
+https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/user/UserManager.sol#L586
 
 ```
+    function updateTrust(address borrower, uint96 trustAmount) external onlyMember(msg.sender) whenNotPaused {
+```
+It's a permissioned call eventually, i.e. only member can vouch someone. Given the context of the design, it doesn't seem to introduce a threat unless VouchFaucet.sol is a member.
 
-# Issue M-5: Minimum borrow amount can be surpassed and borrower can be treated as being overdue earlier than their actual overdue time 
+**trachevgeorgi**
+
+@mystery0x With all due respect, I believe you do not understand the issue correctly. The VouchFaucet.sol contract is going to be staking in Union, like a member. Therefore, after it stakes borrowers are going to be able to borrow assets from the VoucheFaucet.sol contract, like they would from any other member. The only way to borrow from a member is if the lender (VouchFaucet.sol in the case) calls updateTrust with the specific borrower as the first parameter. Essentially, the borrower is vouching for / increasing their trust in a certain member.
+In the issue above any address can increase their own trust on behalf of VouchFaucet.sol. The issue is that they can give themselves too much trust, due to insufficient validation. As a result, they are going to be able to borrower the entire stake of VouchFaucet.sol instead of the allowed TRUST_AMOUNT.
+
+**WangSecurity**
+
+As I understand not every staker is necessarily a member, so @trachevgeorgi could you elaborate more on how VouchFacet can become a member for `updateTrust` to be called?
+
+**trachevgeorgi**
+
+@WangSecurity Yes, I can. There are two ways that any address can become a member. The first one is the `addMember` `onlyAdmin` function, which allows the admin to make any address a member for free. The second one is the `registerMember(address newMember)` function, which allows users to make other addresses members by paying a fee of Union Token: https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/user/UserManager.sol#L722-L728
+The owner of the VouchFoucet.sol contract will most likely use the second option.
+
+Furthermore, it is important to add that if the VouchFaucet.sol contract is not a member, it is not going to be able to function, so being a member is an expected necessity.
+
+**WangSecurity**
+
+> Furthermore, it is important to add that if the VouchFaucet.sol contract is not a member, it is not going to be able to function, so being a member is an expected necessity.
+
+Can you elaborate more about it and where you got this info from?
+
+Sorry for the late reply, I'm trying to get info on VouchFacet from the sponsor.
+
+**trachevgeorgi**
+
+> > Furthermore, it is important to add that if the VouchFaucet.sol contract is not a member, it is not going to be able to function, so being a member is an expected necessity.
+> 
+> Can you elaborate more about it and where you got this info from?
+> 
+> Sorry for the late reply, I'm trying to get info on VouchFacet from the sponsor.
+
+Hi, I believe that many users will be members as this is the only way to actually lend your money. Being a member cannot be a very restrictive role that only certain addresses trusted by the protocol can have access to. We understand that as any address can register themselves or others as members by just paying a fee of Union Token, so it is definitely intended for any address to be possible and not difficult to become a member.
+Regarding your question on where I get the information from, if you look at the `registerMember` function and the developer comments above it you can get all of the information necessary: https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/7ffe43f68a1b8e8de1dfd9de5a4d89c90fd6f710/union-v2-contracts/contracts/user/UserManager.sol#L715-L728
+
+Also it is important to notice that in order to vouch for somebody (vouching essentially means that you are allowing a borrower to borrow from your funds) you need to be a member, therefore all lenders will need to be members.
+
+The purpose of VouchFaucet is for it to stake in the protocol and after that for the contract to be able to vouch for other users so that the users will be able to borrow from the VouchFaucet's stake, for this to work it is expected for VouchFaucet to be a member.
+
+**trachevgeorgi**
+
+@WangSecurity To add to the comment above, my report essentially indicates the issue that any user can increase how much the `VouchFaucet.sol` contract, which must be a member, has vouched for them, even though they should only be allowed to get only `TRUST_AMOUNT` of trust out of `VouchFaucet.sol`. For example, if `VouchFaucet.sol` has a stake of `2 * TRUST_AMOUNT`, a single user should only be able to get `1 * TRUST_AMOUNT`, and therefore be able to borrow only `1 * TRUST_AMOUNT`, but currently they can borrow the entire `2 * TRUST_AMOUNT`.
+
+**WangSecurity**
+
+Thank you, I understand why it's important for the users to be members, but I meant why it's important for VouchFacet contract to be a member, specifically. Excuse me for the confusion, is this information in the docs or you cam to this conclusion by just getting more context of the code base? 
+
+I see VouchFacet is also used to stake in the User Manager. And agree it would be strange that there's a function to give trust but this contract wouldn't be a member.
+
+What makes me confused here is that on one of other escalations one Watson shared a screenshot from the sponsor saying VouchFacet::claimTokens is just to rescue tokens that were accidentally sent into the contract. So that makes me confused about the entire VouchFacet and why it's going to be used.
+
+**trachevgeorgi**
+
+> Thank you, I understand why it's important for the users to be members, but I meant why it's important for VouchFacet contract to be a member, specifically. Excuse me for the confusion, is this information in the docs or you cam to this conclusion by just getting more context of the code base?
+> 
+> I see VouchFacet is also used to stake in the User Manager. And agree it would be strange that there's a function to give trust but this contract wouldn't be a member.
+> 
+> What makes me confused here is that on one of other escalations one Watson shared a screenshot from the sponsor saying VouchFacet::claimTokens is just to rescue tokens that were accidentally sent into the contract. So that makes me confused about the entire VouchFacet and why it's going to be used.
+
+@WangSecurity Hi! There are no documentations on this contract but I believe it is pretty clear what its purpose is just by looking at the code and the contract’s name. Firstly, the name VouchFaucet indicates that it is another way for users to vouch for other users. They just stake their funds and allow others to claim a certain amount of trust in order to borrow from the stake. It is impossible for claimVouch to be used to rescue anything as its sole purpose is to allow addresses to claim an amount of trust. I have pointed two issues with the code the main one being able to bypass the TRUST_AMOUNT limit which is why I believe the finding should be valid.
+
+**maxweng**
+
+Hi, this contract is only used for testing purposes on Testnet. And `claimVouch()` is just to allow testers to easily get vouches even no other members do it for them.
+
+**WangSecurity**
+
+But as I understand this wasn't mentioned anywhere during the contest, correct?
+
+Also, @trachevgeorgi as I understand, even if VouchFaucet is not a member, any existing member can give vouchers to VouchFaucet and then call `registerMemeber` to make VouchFaucet a member, correct? In that way, this bug would be possible, if we disregard the fact that it's not intended to be deployed. Also, is there a way to remove a member?
+
+**trachevgeorgi**
+
+> But as I understand this wasn't mentioned anywhere during the contest, correct?
+> 
+> Also, @trachevgeorgi as I understand, even if VouchFaucet is not a member, any existing member can give vouchers to VouchFaucet and then call `registerMemeber` to make VouchFaucet a member, correct? In that way, this bug would be possible, if we disregard the fact that it's not intended to be deployed. Also, is there a way to remove a member?
+
+@WangSecurity Yes, anyone can make VouchFaucet a member and just as you said it was never mentioned where the contract will be deployed therefore it is still in scope. Also I do not find a function that can remove an address from the member list.
+
+**WangSecurity**
+
+Then, I agree it has to be a valid finding. But, the medium is more appropriate because it doesn't necessarily lead to a loss of funds, the malicious user cannot increase the trust to infinity. It will always be equal to TRUST_AMOUNT which can be small, there's a maximum number of vouchers that one member can have. 
+
+Hence, planning to accept the escalation and validate with medium severity.
+
+**trachevgeorgi**
+
+> Then, I agree it has to be a valid finding. But, the medium is more appropriate because it doesn't necessarily lead to a loss of funds, the malicious user cannot increase the trust to infinity. It will always be equal to TRUST_AMOUNT which can be small, there's a maximum number of vouchers that one member can have.
+> 
+> Hence, planning to accept the escalation and validate with medium severity.
+
+I am ok with a medium evaluation. I will not be escalating further.
+
+**WangSecurity**
+
+Result:
+Medium
+Unique
+
+@mystery0x @trachevgeorgi are there any duplicates?
+
+**sherlock-admin4**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [trachevgeorgi](https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/102/#issuecomment-2240072437): accepted
+
+# Issue M-4: Minimum borrow amount can be surpassed and borrower can be treated as being overdue earlier than their actual overdue time 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/114 
 
@@ -1707,64 +1187,259 @@ Consider controlling the effective amount being borrowed, e.g.:
 +       if (actualAmount < _minBorrow) revert AmountLessMinBorrow();
 ```
 
-# Issue M-6: any stakers who lent to borrowers can increase their rewards by a portion repayment 
 
-Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/115 
+
+## Discussion
+
+**maxweng**
+
+I think this issue only happens when the underlying market protocol we integrate doesn't implement the `withdraw()` function correctly, which it succeeded and returned true but the withdrawal amount was less than what the caller requested.
+But to tight things up on our end, I think we can add another check on the actual withdrawal amount.
+
+# Issue M-5: `updateLocked()` locks a rounded down value 
+
+Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/133 
 
 ## Found by 
-0xJoyBoy03
-### Summary
+hyh
+## Summary
 
-In the `_repayBorrowFresh` function, the `lastRepay` will be set to 0 if the caller executes a full repayment and set to the current timestamp if the caller repays a portion of the borrowed amount. Since everyone can repay, any staker can repay a dust amount to update the `lastRepay` to accrue their rewards more than they deserve. The `stakerCoinAges.frozenCoinAge` and `stakerFrozen` in the `_getEffectiveAmounts` function won't increase if the `currTime - lastRepay > overdueTime` is false, and when the `lastRepay` gets updated, it will be false manually.
+Since `decimalReducing()` rounds down and fee can use all the precision space the UToken's `updateLocked()` call performed on borrowing will effectively lock less then is borrowed.
 
+## Vulnerability Detail
 
-### Root Cause
+`decimalReducing(actualAmount + fee, underlyingDecimal)` performed on locking can lose precision, i.e. since fee is added the rounding down can have a material impact.
 
-In [`UToken.sol:742`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L742), the `lastRepay` gets updated every time a portion repayment is on. this will cause accruing rewards for any stakers
-In [`UserManager:985`](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/user/UserManager.sol#L985-L1012) the `stakerFrozen` and `stakerCoinAges.frozenCoinAge` calculation does not increase when a portion repayment is on, leading to inaccurate reward distributions.
+## Impact
 
-allowing any staker to repay any amount is a mistake as it enables manipulation of the `lastRepay` timestamp, resulting in unfair reward accrual.
-when the `currTime - lastRepay > overdueTime` is true, the `stakerFrozen` and `stakerCoinAges.frozenCoinAge` get increase which leads to a decrease in the `effectiveStaked` and `effectiveLocked`. decreasing these two variables affects the reward multiplier lower which is true and correct but any stakers can increase those two variables which leads to more rewards for them
+User can have borrowed value slightly exceeding the cumulative lock amount due to rounding of the fee added.
 
-### Internal pre-conditions
+## Code Snippet
 
-1. the staker needs to trust a borrower
-2. the borrower needs to borrow from the staker
+`updateLocked()` will lock a rounded down number for a user:
 
-### External pre-conditions
+[UToken.sol#L656-L660](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L656-L660)
 
-non
-
-### Attack Path
-
-1. Bob the borrower, borrows from Alice the staker who trusts Bob
-2. Alice repays 1 wei for the loan that was given to Bob to update the `lastRepay` to the current timestamp. this will lead to more rewards for Alice and a loss of funds for the protocol
-
-### Impact
-
-Any staker can accrue their rewards more than they deserve
-
-### PoC
-
-   ```js
-       function _getRewardsMultiplier(UserManagerAccountState memory user) internal pure returns (uint256) {
-        if (user.isMember) {
-            if (user.effectiveStaked == 0) {
-                return memberRatio;
-            }
-
-            // @audit-high any staker can increase their rewards multiplier by repaying a dust amount because of lastRepay variable gets updated and leads to more `lendingRatio`
-            uint256 lendingRatio = user.effectiveLocked.wadDiv(user.effectiveStaked);
-
-            return lendingRatio + memberRatio;
-        } else {
-            return nonMemberRatio;
-        }
-    }
-    
+```solidity
+        IUserManager(userManager).updateLocked(
+            msg.sender,
+            decimalReducing(actualAmount + fee, underlyingDecimal),
+            true
+        );
 ```
 
-### Mitigation
+## Tool used
 
-just let the borrowers repay their loan
+Manual Review
+
+## Recommendation
+
+Consider introducing an option for rounding the `decimalReducing()` output up, e.g.:
+
+[UToken.sol#L656-L660](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L656-L660)
+
+```diff
+        IUserManager(userManager).updateLocked(
+            msg.sender,
+-           decimalReducing(actualAmount + fee, underlyingDecimal),
++           decimalReducing(actualAmount + fee, underlyingDecimal, true),
+            true
+        );
+```
+
+https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/ScaledDecimalBase.sol#L19-L27
+
+```diff
+-   function decimalReducing(uint256 actualAmount, uint8 decimal) internal pure returns (uint256) {
++   function decimalReducing(uint256 actualAmount, uint8 decimal, bool roundUp) internal pure returns (uint256) {
+        if (decimal > 18) {
+            uint8 diff = decimal - 18;
+            return actualAmount * 10 ** diff;
+        } else {
+            uint8 diff = 18 - decimal;
+            uint256 rounding = roundUp ? 10 ** diff - 1 : 0;
+-           return actualAmount / 10 ** diff;
++           return (actualAmount + rounding) / 10 ** diff;
+        }
+    }
+```
+
+
+
+## Discussion
+
+**sherlock-admin3**
+
+1 comment(s) were left on this issue during the judging contest.
+
+**0xmystery** commented:
+>  Low QA on rounding direction
+
+
+
+**dmitriia**
+
+> Low QA on rounding direction
+
+[Similarly](https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/122#issuecomment-2241179486), there is no such rule.
+
+**dmitriia**
+
+Escalate
+It looks like the `locked < principal` state reached with locking [slightly less](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L656-L660) than it was [borrowed](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L642) leads to inability to fully close a position with write off as, since `repayAmount` is locked amount derived, it will be less than principal:
+
+[UserManager.sol#L866-L867](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/user/UserManager.sol#L866-L867)
+
+```solidity
+        IAssetManager(assetManager).debtWriteOff(stakingToken, amount);
+>>      uToken.debtWriteOff(borrowerAddress, amount);
+```
+
+[UToken.sol#L785-L800](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L785-L800)
+
+```solidity
+    function debtWriteOff(address borrower, uint256 amount) external override whenNotPaused onlyUserManager {
+        if (amount == 0) revert AmountZero();
+        uint256 actualAmount = decimalScaling(amount, underlyingDecimal);
+
+        uint256 oldPrincipal = _getBorrowed(borrower);
+        uint256 repayAmount = actualAmount > oldPrincipal ? oldPrincipal : actualAmount;
+
+        accountBorrows[borrower].principal = oldPrincipal - repayAmount;
+        _totalBorrows -= repayAmount;
+
+>>      if (repayAmount == oldPrincipal) {
+            // If all principal is written off, we can reset the last repaid time to 0.
+            // which indicates that the borrower has no outstanding loans.
+            accountBorrows[borrower].lastRepay = 0;
+        }
+    }
+```
+
+Since it breaks this workflow and `lastRepay` has a material impact on the users (this borrower will have `checkIsOverdue() == true` for a next borrow, i.e. will not be able to create a non-dust position thereafter), it looks like it's a medium probability (writing-off is a requirement) and impact (credit line is unavailable with the corresponding material impact on the borrower), i.e. it's a medium severity issue.
+
+**sherlock-admin3**
+
+> Escalate
+> It looks like the `locked < principal` state reached with locking [slightly less](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L656-L660) than it was [borrowed](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L642) leads to inability to fully close a position with write off as, since `repayAmount` is locked amount derived, it will be less than principal:
+> 
+> [UserManager.sol#L866-L867](https://github.com/sherlock-audit/2024-06-union-finance-update-2-dmitriia/blob/da78cdb6cbf25cd2dc44499bbcd644444f7d125f/union-v2-contracts/contracts/user/UserManager.sol#L866-L867)
+> 
+> ```solidity
+>         IAssetManager(assetManager).debtWriteOff(stakingToken, amount);
+> >>      uToken.debtWriteOff(borrowerAddress, amount);
+> ```
+> 
+> [UToken.sol#L785-L800](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/da78cdb6cbf25cd2dc44499bbcd644444f7d125f/union-v2-contracts/contracts/market/UToken.sol#L785-L800)
+> 
+> ```solidity
+>     function debtWriteOff(address borrower, uint256 amount) external override whenNotPaused onlyUserManager {
+>         if (amount == 0) revert AmountZero();
+>         uint256 actualAmount = decimalScaling(amount, underlyingDecimal);
+> 
+>         uint256 oldPrincipal = _getBorrowed(borrower);
+>         uint256 repayAmount = actualAmount > oldPrincipal ? oldPrincipal : actualAmount;
+> 
+>         accountBorrows[borrower].principal = oldPrincipal - repayAmount;
+>         _totalBorrows -= repayAmount;
+> 
+> >>      if (repayAmount == oldPrincipal) {
+>             // If all principal is written off, we can reset the last repaid time to 0.
+>             // which indicates that the borrower has no outstanding loans.
+>             accountBorrows[borrower].lastRepay = 0;
+>         }
+>     }
+> ```
+> 
+> Since it breaks this workflow and `lastRepay` has a material impact on the users (this borrower will have `checkIsOverdue() == true` right after next borrow, i.e. for a non-dust position), then it has medium probability and impact, i.e. it's a medium severity issue.
+
+You've created a valid escalation!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**mystery0x**
+
+Please see comment on #122.
+
+**dmitriia**
+
+> Please see comment on #122.
+
+It's not relevant here as, while the rounding is not limited to 1 wei, the issue is not about the size of rounding, but about the logic break up. The logic expects precise amounts match and is not working otherwise (`lastRepay` isn't set). 
+
+**WangSecurity**
+
+This report is about precision loss and it falls under the following rule:
+
+> PoC is required for all issues falling into any of the following groups:
+issues related to precision loss
+
+I believe this report lacks POC (coded or written) and sufficient proof rounding down precision loss.
+
+Planning to reject the escalation and leave the issue as it is, since it doesn't fulfil the POC requirements.
+
+**dmitriia**
+
+Schematic POC:
+
+0. Let's examine USDC market with originationFee = `1e-8`, which is `1e10` in 18 dp representation. Bob has no loans, Alice opened trust for him only
+
+1. Bob borrows `99` USDC from Alice's trust, his principal is set to this amount converted to 18 dp, `actualAmount`, with `calculatingFee(actualAmount) = (originationFee * actualAmount) / WAD` added on top. The principal for their loan position [is](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L642) `99e18 + 1e10 * 99e18 / 1e8 = 99 * (1e18 + 1e10)`
+
+2. Locking operation deals with 6 dp figures and uses `decimalReducing(actualAmount + fee, underlyingDecimal)`, so it [locks](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L658) only `99 * (1e18 + 1e10) / 1e12 = 99e6`
+
+3. A substantial time passes and this debt ends up being written off, for example via an arrangement between Bob and Alice for some OTC repayment, say Bob will give a similarly priced item to Alice off chain and she will write off the debt
+
+4. Writing off [uses](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L787) `99e6` only (being based on underlying amount, 6 dp figure) and will not clear Bob's principal fully, he will still have the `99e10` part (it's an internal 18 dp figure). Since principal was not cleared, Bob's `lastRepay` was not reset, it still holds the value set in (1), i.e. the system treats his position as being borrowed long time ago and not repaid since. It's not material for now as position remainder is dust sized
+
+5. However, when Bob try to borrow again from Alice's trust (which is tied to Bob's address) it will be [denied](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L620) as his position will be deemed [overdue](https://github.com/sherlock-audit/2024-06-union-finance-update-2/blob/main/union-v2-contracts/contracts/market/UToken.sol#L461-L463), so the existing trust will be unavailable for borrowing
+
+**WangSecurity**
+
+Unfortunately, POC and the proof of precision loss should have been described in the report. Hence, I cannot accept this as a rewarded finding based on the rules.
+
+**dmitriia**
+
+Well, in this case the issue can be excluded as incomplete per initial submission. Please refrain from implying the need of any additional actions in such cases in the future. Note that excluding the issues from contest report also exclude them from the fix review, which scope is contest defined. 
+
+**WangSecurity**
+
+> in this case the issue can be excluded as incomplete per initial submission
+
+Good suggestion, I'm unsure it can be automated, but will look into that.
+
+> Please refrain from implying the need of any additional actions in such cases in the future
+
+Excuse me, I didn't imply anything is needed and it was poor phrasing from my side then.
+
+> Note that excluding the issues from contest report also exclude them from the fix review, which scope is contest defined.
+
+As far as I know, it doesn't and the sponsor can fix any issue they desire by just adding a "Will fix" label through their dashboard.
+
+Hence, the decision remains the same, planning to reject the escalation and leave the issue as it is, based on the same arguments above.
+
+**dmitriia**
+
+Your can imply basically anything, there is no such obligation and I will be checking only issues from the report. If any others are deemed not important enough to be in the report, then their fix is not important either.
+
+**WangSecurity**
+
+After further considering the rule about the POC, decision is that submitting it after the contest when the lead judge requests or during the contest is sufficient. Excuse me for the confusion previously. The POC shows how the precision leads Bob’s position being counted as opened and leaving the trust unavailable for Bob.
+
+Planning to accept the escalation and validate with medium severity. @mystery0x @dmitriia are there any duplicates?
+
+**WangSecurity**
+
+Result:
+Medium
+Unique
+
+**sherlock-admin4**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [dmitriia](https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/133/#issuecomment-2241841419): accepted
 
