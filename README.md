@@ -113,6 +113,22 @@ Get 'globalTotalStaked' after calculating all frozen assets in the userManager f
   ++  uint256 globalTotalStaked = userManager.globalTotalStaked();
 ```
 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/unioncredit/union-v2-contracts/pull/180
+
+
+**dmitriia**
+
+> The protocol team fixed this issue in the following PRs/commits: [unioncredit/union-v2-contracts#180](https://github.com/unioncredit/union-v2-contracts/pull/180)
+
+Fix looks ok
+
 # Issue H-2: VouchFaucet can be immediately drained by anyone 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/33 
@@ -362,6 +378,22 @@ function repayBorrowWithPermit(uint256 amount, ...) external {
 }
 ```
 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/unioncredit/union-v2-contracts/pull/177
+
+
+**dmitriia**
+
+> The protocol team fixed this issue in the following PRs/commits: [unioncredit/union-v2-contracts#177](https://github.com/unioncredit/union-v2-contracts/pull/177)
+
+Fix looks ok
+
 # Issue H-4: The _totalStaked tracker calculation is incorrect and will be inflated due to the improper logic in the writeOffDebt function of the UserManager contract, leading to wrong Comptroller gInflationIndex being calculated and wrong user rewards being issued 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/105 
@@ -590,9 +622,27 @@ Instead of subtracting `amount`, you should subtract the `actualAmount` from the
         vouch.lastUpdated = currTime.toUint64();
 ```
 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/unioncredit/union-v2-contracts/pull/179
+
+
+**dmitriia**
+
+> The protocol team fixed this issue in the following PRs/commits: [unioncredit/union-v2-contracts#179](https://github.com/unioncredit/union-v2-contracts/pull/179)
+
+Fix looks ok
+
 # Issue M-1: Possible loss of funds, transfer functions can silently fail 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/22 
+
+The protocol has acknowledged this issue.
 
 ## Found by 
 Bauchibred, JuggerNaut63, MohammedRizwan, smbv-1923, tsueti\_
@@ -782,6 +832,8 @@ Escalation status:
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/23 
 
+The protocol has acknowledged this issue.
+
 ## Found by 
 0xAadi, 0xmystery, KungFuPanda, MohammedRizwan, bareli, cryptphi, korok, trachev
 ## Summary
@@ -869,6 +921,8 @@ Consider below changes:
 # Issue M-3: Any user can claim an unlimited amount of vouch in `VouchFaucet.sol` 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/102 
+
+The protocol has acknowledged this issue.
 
 ## Found by 
 trachev
@@ -1196,6 +1250,18 @@ Consider controlling the effective amount being borrowed, e.g.:
 I think this issue only happens when the underlying market protocol we integrate doesn't implement the `withdraw()` function correctly, which it succeeded and returned true but the withdrawal amount was less than what the caller requested.
 But to tight things up on our end, I think we can add another check on the actual withdrawal amount.
 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/unioncredit/union-v2-contracts/pull/175
+
+
+**dmitriia**
+
+> The protocol team fixed this issue in the following PRs/commits: [unioncredit/union-v2-contracts#175](https://github.com/unioncredit/union-v2-contracts/pull/175)
+
+Fix looks ok
+
 # Issue M-5: `updateLocked()` locks a rounded down value 
 
 Source: https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/133 
@@ -1442,4 +1508,18 @@ Escalations have been resolved successfully!
 
 Escalation status:
 - [dmitriia](https://github.com/sherlock-audit/2024-06-union-finance-update-2-judging/issues/133/#issuecomment-2241841419): accepted
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/unioncredit/union-v2-contracts/pull/176
+
+
+**dmitriia**
+
+> The protocol team fixed this issue in the following PRs/commits: [unioncredit/union-v2-contracts#176](https://github.com/unioncredit/union-v2-contracts/pull/176)
+
+Fix looks ok.
+
+It looks like `1 wei` of locked will remain in some cases, as one described above, after `{borrow} -> {full repay}`, since borrow rounds up, while repay rounds down in `updateLocked(...)` arguments. As of now I see no issue in that as there won't be any material accumulation, this and further workflow remain operational, particularly `lastRepay` is correctly reset, being conditional on principal, which is fully cleared. Writing off will be functional as well due to `repayAmount = actualAmount > oldPrincipal ? oldPrincipal : actualAmount` logic.
 
